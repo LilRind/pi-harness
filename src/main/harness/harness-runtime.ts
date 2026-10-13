@@ -94,6 +94,7 @@ import {
 import { DiagnosticsService, buildInsights } from './diagnostics/diagnostics-service'
 import { compareRuns } from './compare/compare-service'
 import { RunExportService } from './export/run-export-service'
+import { HarnessEventExporter } from './export/harness-event-exporter'
 
 const MAX_TIMELINE_EVENTS = 300
 export const DEFAULT_STORE_SETTINGS: HarnessStoreSettings = {
@@ -131,6 +132,12 @@ export interface HarnessRuntimeOptions {
   appVersion?: string
   /** Pi SDK version, stamped into debug bundles. */
   piVersion?: string | null
+  /** Standard JSONL event exporter; disabled unless enabled by the host. */
+  eventExporter?: HarnessEventExporter
+  /** Export directory override (defaults under userData via harness-exports). */
+  exportDir?: string
+  /** Enable the standard JSONL export sink (default: false). */
+  enableEventExport?: boolean
 }
 
 /**
@@ -158,6 +165,7 @@ export class HarnessRuntime implements AgentRuntime {
   readonly storeSettings: JsonStore<HarnessStoreSettings>
   private readonly runRepository: RunRepository
   private readonly exportService: RunExportService
+  readonly eventExporter: HarnessEventExporter
 
   constructor(
     private readonly adapter: HarnessAdapter,
@@ -252,6 +260,15 @@ export class HarnessRuntime implements AgentRuntime {
       platform: `${os.platform()}-${os.arch()}`,
       nodeVersion: process.versions.node
     })
+    this.eventExporter =
+      options.eventExporter ??
+      new HarnessEventExporter({
+        dir: options.exportDir ?? path.join(os.homedir(), '.pi-harness', 'harness-exports'),
+        enabled: options.enableEventExport !== false
+      })
+    if (options.eventExporter || options.enableEventExport !== false) {
+      this.onEvent((envelope) => this.eventExporter.observe(envelope.event, envelope.sessionId))
+    }
     if (options.git) this.git = options.git
     if (options.sessions) this.sessions = options.sessions
     void this.applyRetention()
@@ -986,6 +1003,7 @@ export class HarnessRuntime implements AgentRuntime {
   }
 
   async shutdownAll(): Promise<void> {
+    await this.eventExporter.shutdown()
     await this.adapter.shutdownAll()
     for (const unsubscribe of this.observedSessions.values()) unsubscribe()
     this.observedSessions.clear()
