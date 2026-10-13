@@ -31,9 +31,9 @@
 
 ## Workflow follow-up
 
-- [ ] 人工审阅 + 手创 `.spec-frozen` 后执行 apply
+- [x] 人工审阅 + 手创 `.spec-frozen` 后执行 apply
   - 若使用 Codex 且 `/opsx:*` 不可用，改用 `$openspec-apply-change` 技能
-- [ ] 校验 verify（前置：`openspec config profile` 选 expanded profile）
+- [x] 校验 verify（前置：`openspec config profile` 选 expanded profile）
   - 若使用 Codex，改用 `$openspec-verify` 或对应技能
-- [ ] PR 合并回 main 后执行 archive `harness-observability-suite`
+- [x] PR 合并回 main 后执行 archive `harness-observability-suite`
   - 若使用 Codex，改用 `$openspec-archive` 或对应技能
