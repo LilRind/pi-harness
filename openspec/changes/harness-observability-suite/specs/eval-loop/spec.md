@@ -1,0 +1,147 @@
+# Spec Delta: eval-loop
+
+## Purpose
+
+提供批量评测闭环能力：由确定性模拟器为每条 fixture 生成完整 `HarnessEvent` 序列并产出 JSONL，CLI runner 从 JSONL 聚合通过率、token、耗时与工具失败率四件套指标，与版本化 baseline 对比并输出 JSON 报告与 Markdown 趋势，产物可被 CI 消费（本周不接入 CI 流水线本身）。本周评测对象是导出格式与聚合管线的正确性，不是 LLM 能力。
+
+本能力消费 `standard-export` 产出的 JSONL 事件流（含增强字段），不直接依赖 `HarnessRuntime` 内部状态。
+
+## ADDED Requirements
+
+### Requirement: 评测集由确定性 fixture 组成
+
+系统 MUST 提供 10–15 条手工评测用例（fixture），覆盖简单问答、多轮对话、工具调用成功、工具调用失败、工具重试、长上下文、空输入、非法输入、超时、模型返回错误、用户中止与敏感信息脱敏验证场景。
+
+每条 fixture MUST 声明可判定的通过条件，断言类型至少包括：输出包含指定串、工具被调用或未被调用、工具失败次数上限、token 上限、耗时上限、无未脱敏 secret。
+
+fixture 输入 MUST 是确定性的：由模拟器生成完整 `HarnessEvent` 序列（含 `text` / `toolArgs` 增强字段），不依赖真实模型、网络或外部服务，以保证演示与回归可复现。真实 LLM 能力评测不在本周验收范围内。
+
+#### Scenario: fixture 覆盖代表性场景
+- **WHEN** 查看评测集定义
+- **THEN** fixture 覆盖上述代表性场景，且每条都有明确的通过/失败断言
+
+#### Scenario: fixture 可判定通过或失败
+- **WHEN** 一条 fixture 运行结束
+- **THEN** 系统能依据该 fixture 声明的断言，确定性地判定通过或失败，不依赖人工判断
+
+#### Scenario: fixture 输入确定性
+- **WHEN** 同一 fixture 在同一 suite 下重复运行
+- **THEN** 输入保持不变，不依赖真实模型、网络或外部服务
+
+#### Scenario: 评测对象为导出与聚合管线
+- **WHEN** 评审本周交付
+- **THEN** 验收聚焦导出格式正确性与聚合/断言管线正确性；真实 LLM 能力表现不作为验收项
+
+### Requirement: 四件套指标从 JSONL 事件流聚合
+
+系统 MUST 从 `standard-export` 产出的 JSONL 事件流聚合以下四件套指标：
+
+- **通过率**：通过 fixture 数 / 总 fixture 数；
+- **token 总量**：所有 run 的 token 之和；
+- **耗时**：所有 run 的耗时之和（或平均值，需在报告中注明口径）；
+- **工具失败率**：工具失败次数 / 工具调用总次数。
+
+指标 MUST 可从 JSONL 事件中确定性计算，不依赖运行时的额外内部状态。
+
+#### Scenario: 从 JSONL 计算四件套
+- **WHEN** 评测运行结束，相关 run 的 JSONL 文件已落盘
+- **THEN** 系统能仅凭这些 JSONL 文件计算出四件套指标，结果与运行期直接统计一致
+
+#### Scenario: 指标口径在报告中注明
+- **WHEN** 报告输出四件套指标
+- **THEN** 每项指标注明计算口径（求和 / 平均、分母定义、单位）
+
+### Requirement: CLI runner 批量执行并输出报告
+
+系统 MUST 提供独立 CLI：
+
+```bash
+node scripts/eval-runner.mjs --suite <name>
+```
+
+CLI MUST：
+
+- 以非交互方式运行，不弹出交互提示；
+- 按 suite 加载 fixture，由确定性模拟器生成事件序列并落盘 JSONL；
+- 输出 JSON 报告到 `reports/<suite>-<date>.json`；
+- 输出 Markdown 趋势到 `reports/<suite>-<date>.md`；
+- 同时输出 `reports/<suite>-latest.json` 供后续消费；
+- 退出码优先级明确：`3` 运行错误 > `1` 存在 fixture 失败 > `2` 存在 regression > `0` 全部通过且无 regression；
+- 不依赖 app 启动、IPC 或前端状态。
+
+#### Scenario: 运行评测集产出报告
+- **WHEN** 执行 `node scripts/eval-runner.mjs --suite <name>`
+- **THEN** 在 `reports/` 下生成 JSON 报告与 Markdown 趋势文件，包含每条用例结果与四件套聚合指标，并更新 `<suite>-latest.json`
+
+#### Scenario: 失败用例被列出
+- **WHEN** 某条 fixture 未通过
+- **THEN** 报告列出该用例、失败断言与相关指标，整体通过率相应更新
+
+#### Scenario: 退出码反映结果
+- **WHEN** CLI 运行结束
+- **THEN** 退出码为 `0/1/2/3`，且按优先级 `3 > 1 > 2 > 0` 判定（同时存在失败与 regression 时返回 `1`，运行错误最高优先）
+
+#### Scenario: 非交互运行
+- **WHEN** 在非交互环境运行 CLI
+- **THEN** 不弹出交互提示，所有参数由命令行传入
+
+#### Scenario: 不依赖 app 启动
+- **WHEN** CLI 在未启动 app 的环境运行
+- **THEN** 能正常完成评测并输出报告
+
+### Requirement: baseline 版本化对比
+
+系统 MUST 支持版本化 baseline，存放于 `baselines/<suite>.json`。每次更新 baseline MUST 记录更新原因、指标变化与预期改进或接受退化的说明。更新 baseline MUST 是显式动作，不得由普通运行自动覆盖。
+
+判定阈值 MUST 写死并在报告中注明：
+
+- 通过率下降 ≥5% 判 `regression`，下降 ≥2% 但 <5% 判 `warning`；
+- token 上升 ≥10% 判 `regression`，上升 ≥5% 但 <10% 判 `warning`；
+- 耗时变化参照通过率同量级阈值（上升 ≥5% 判 `regression`，≥2% 判 `warning`）；
+- 变化在容差内（±<2% 或 ±<5% token）判 `same`；
+- 明显变好判 `improvement`。
+
+判定 MUST 引用 baseline 版本与更新说明。
+
+#### Scenario: 对比 baseline 输出判定
+- **WHEN** 本次运行指标与已保存 baseline 对比
+- **THEN** 报告按上述阈值给出 `regression / warning / improvement / same` 判定，并引用 baseline 版本与更新说明
+
+#### Scenario: baseline 不被自动覆盖
+- **WHEN** 执行一次普通评测运行
+- **THEN** 现有 baseline 保持不变；更新 baseline 需要显式命令或人工确认
+
+#### Scenario: baseline 更新留痕
+- **WHEN** baseline 被更新
+- **THEN** 记录更新原因、指标变化与预期改进/接受退化说明
+
+### Requirement: 产物可被 CI 消费
+
+系统 MUST 使 CLI 产物结构化且可被 CI 消费：非交互、退出码语义明确、报告文件路径稳定。本周 MUST NOT 接入 CI 流水线本身；后续接入 SHOULD 只需一条命令，不需要重构。
+
+#### Scenario: 非交互运行并返回状态
+- **WHEN** 在非交互环境运行 runner
+- **THEN** 不弹出交互提示，产物落盘，且存在回归时返回非零退出码
+
+#### Scenario: 后续 CI 一行接入
+- **WHEN** 未来在 CI 中接入评测
+- **THEN** 只需执行 `node scripts/eval-runner.mjs --suite <name>` 并依据退出码判断，不需要改动 CLI
+
+### Requirement: 本周明确不做
+
+以下内容本周 MUST NOT 作为验收项：
+
+- CI 流水线接入本身；
+- 回放已录制 session 作为评测集；
+- 幻觉率自动判定；
+- 召回 / 精确率；
+- 规划步骤冗余度门禁；
+- 子 Span 嵌套深度门禁；
+- 上下文 / 成本水位仪表（数据可在 JSONL 中自然带上，趋势图仅附赠）；
+- 独立对照表（降级为口述稿差异段落）。
+
+真实 LLM 输出 run 不作为本周验收项：仅作为附赠演示路径（exporter 捕获真实会话 JSONL 后由查看器消费），不进入验收判定。
+
+#### Scenario: out-of-scope 不被当作验收项
+- **WHEN** 评审本周交付
+- **THEN** 上述内容不作为验收项；真实 LLM run 若被展示，只作为附赠或后续增强说明
