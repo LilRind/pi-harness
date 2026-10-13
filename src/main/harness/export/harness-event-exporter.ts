@@ -78,7 +78,7 @@ export class HarnessEventExporter {
     }
     const runId =
       event.type === 'run.completed' || event.type === 'run.failed' || event.type === 'run.aborted'
-        ? event.runId
+        ? event.runId ?? this.runBySession.get(sessionId)
         : this.runBySession.get(sessionId)
     const acc = runId ? this.accumulators.get(runId) : undefined
     if (!acc) return
@@ -109,7 +109,7 @@ export class HarnessEventExporter {
       acc.endedAt = event.timestamp
       acc.status =
         event.type === 'run.completed' ? 'success' : event.type === 'run.failed' ? 'failed' : 'aborted'
-      this.flushSync(runId)
+      this.flushSync(runId!)
       this.runBySession.delete(sessionId)
     }
   }
