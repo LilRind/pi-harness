@@ -6,7 +6,7 @@ describe('eventsToSpans', () => {
   it('merges paired message events into one span with start/end', () => {
     const events: HarnessEvent[] = [
       { type: 'message.started', timestamp: 100 },
-      { type: 'message.completed', timestamp: 500, usage: { total: 42 } }
+      { type: 'message.completed', timestamp: 500, usage: { input: 20, output: 22, cacheRead: 0, cacheWrite: 0, total: 42, cost: 0.1 } }
     ]
     const spans = eventsToSpans(events, 'run-1')
     expect(spans).toHaveLength(1)

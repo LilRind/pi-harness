@@ -21,7 +21,7 @@ describe('HarnessEventExporter', () => {
       exporter.observe({ type: 'run.started', timestamp: 100, runId: 'run x', prompt: 'p' }, 's1')
       exporter.observe({ type: 'message.started', timestamp: 110 }, 's1')
       exporter.observe(
-        { type: 'message.completed', timestamp: 200, usage: { total: 7 } },
+        { type: 'message.completed', timestamp: 200, usage: { input: 3, output: 4, cacheRead: 0, cacheWrite: 0, total: 7, cost: 0 } },
         's1'
       )
       exporter.observe({ type: 'run.completed', timestamp: 210, runId: 'run x', status: 'success' }, 's1')

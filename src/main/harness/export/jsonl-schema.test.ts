@@ -27,7 +27,7 @@ describe('jsonl-schema', () => {
       }
     }
     expect(isFooterLine(footer)).toBe(true)
-    expect(isFooterLine({ schemaVersion: 1, sessionId: 's', event: { type: 'run.started', timestamp: 1 } })).toBe(false)
+    expect(isFooterLine({ schemaVersion: 1, sessionId: 's', event: { type: 'run.started', timestamp: 1, runId: 'r', prompt: 'p' } })).toBe(false)
   })
 
   it('sanitizes run ids for file stems', () => {
