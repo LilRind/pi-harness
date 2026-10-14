@@ -3,13 +3,20 @@ import { mkdirSync } from 'node:fs'
 import path from 'node:path'
 import { redactSecrets } from '../../services/logger'
 import type { HarnessEvent, HarnessRunStatus } from '@shared/types/harness'
+import type { SessionEntry } from '@shared/types/workspace'
 import {
   JSONL_SCHEMA_VERSION,
   safeExportStem,
   type ExportFooterLine,
   type ExportLine
 } from './jsonl-schema'
-import { createEnricher, type Enricher, type EnricherSource } from './enricher'
+import {
+  createEnricher,
+  enrichFromEntries,
+  type AssistantMatchState,
+  type Enricher,
+  type EnricherSource
+} from './enricher'
 
 export interface HarnessEventExporterOptions {
   /** Output directory. Created on demand. */
@@ -22,13 +29,18 @@ export interface HarnessEventExporterOptions {
   registerExitHook?: boolean
 }
 
+interface QueuedEvent {
+  event: HarnessEvent
+  sessionId: string
+}
+
 interface RunAccumulator {
   runId: string
   sessionId: string
   startedAt: number
   endedAt: number | null
   status: HarnessRunStatus | null
-  lines: string[]
+  events: QueuedEvent[]
   totalTokens: number
   toolCalls: number
   toolFailures: number
@@ -40,6 +52,10 @@ interface RunAccumulator {
  * Events buffer in memory; run termination (completed/failed/aborted) flushes
  * the file, appends a footer with runtime-level metrics and closes the handle.
  * All writes pass through redactSecrets before touching disk.
+ *
+ * When a `source.readRawEntries` is provided, events are re-enriched from the
+ * real session entries during async flush: assistant text by order and tool
+ * args by `toolCallId`. The sync path stays for no-source setups.
  */
 export class HarnessEventExporter {
   private readonly runBySession = new Map<string, string>()
@@ -69,7 +85,7 @@ export class HarnessEventExporter {
         startedAt: event.timestamp,
         endedAt: null,
         status: null,
-        lines: [],
+        events: [],
         totalTokens: 0,
         toolCalls: 0,
         toolFailures: 0,
@@ -78,7 +94,7 @@ export class HarnessEventExporter {
     }
     const runId =
       event.type === 'run.completed' || event.type === 'run.failed' || event.type === 'run.aborted'
-        ? event.runId ?? this.runBySession.get(sessionId)
+        ? (event.runId ?? this.runBySession.get(sessionId))
         : this.runBySession.get(sessionId)
     const acc = runId ? this.accumulators.get(runId) : undefined
     if (!acc) return
@@ -91,15 +107,7 @@ export class HarnessEventExporter {
       acc.toolCalls++
       if (event.isError === true) acc.toolFailures++
     }
-
-    const enriched = this.enricher.enrich(event)
-    const line: ExportLine = {
-      schemaVersion: JSONL_SCHEMA_VERSION,
-      sessionId,
-      event,
-      ...(enriched ? { enriched } : {})
-    }
-    acc.lines.push(JSON.stringify(redactSecrets(line)))
+    acc.events.push({ event, sessionId })
 
     if (
       event.type === 'run.completed' ||
@@ -109,15 +117,53 @@ export class HarnessEventExporter {
       acc.endedAt = event.timestamp
       acc.status =
         event.type === 'run.completed' ? 'success' : event.type === 'run.failed' ? 'failed' : 'aborted'
-      this.flushSync(runId!)
+      void this.flush(runId!)
       this.runBySession.delete(sessionId)
     }
   }
 
-  /** Flush a single run from memory to disk (sync, used by observation path). */
+  /** Flush a single run. Prefers real session entries when a source is present. */
+  async flush(runId: string): Promise<void> {
+    const acc = this.accumulators.get(runId)
+    if (!acc || acc.events.length === 0) return
+    let entries: SessionEntry[] | null = null
+    const read = this.options.source?.readRawEntries
+    if (read) {
+      try {
+        const result = read(acc.sessionId)
+        entries = Array.isArray(result) ? result : await result
+      } catch {
+        entries = null
+      }
+    }
+    this.writeAccumulator(runId, entries)
+  }
+
+  /** Flush a single run from memory to disk (sync, no session enrichment). */
   flushSync(runId: string): void {
     const acc = this.accumulators.get(runId)
-    if (!acc || acc.lines.length === 0) return
+    if (!acc || acc.events.length === 0) return
+    this.writeAccumulator(runId, null)
+  }
+
+  private writeAccumulator(runId: string, entries: SessionEntry[] | null): void {
+    const acc = this.accumulators.get(runId)
+    if (!acc || acc.events.length === 0) return
+    const assistantState: AssistantMatchState = { assistantIndex: 0 }
+    const lines: string[] = []
+    for (const queued of acc.events) {
+      const enriched = this.enricher.enrich(queued.event, queued.sessionId)
+      const fromEntries = entries
+        ? enrichFromEntries(queued.event, entries, assistantState)
+        : undefined
+      const line: ExportLine = {
+        schemaVersion: JSONL_SCHEMA_VERSION,
+        sessionId: queued.sessionId,
+        event: queued.event,
+        ...(enriched || fromEntries ? { enriched: enriched ?? fromEntries } : {})
+      }
+      lines.push(JSON.stringify(redactSecrets(line)))
+    }
     const footer: ExportFooterLine = {
       schemaVersion: JSONL_SCHEMA_VERSION,
       footer: {
@@ -132,7 +178,7 @@ export class HarnessEventExporter {
         toolFailures: acc.toolFailures
       }
     }
-    const body = [...acc.lines, JSON.stringify(redactSecrets(footer))].join('\n') + '\n'
+    const body = [...lines, JSON.stringify(redactSecrets(footer))].join('\n') + '\n'
     mkdirSync(this.dir, { recursive: true })
     const file = path.join(this.dir, `${safeExportStem(runId)}.jsonl`)
     writeFileSync(file, body, 'utf8')
@@ -145,7 +191,7 @@ export class HarnessEventExporter {
   }
 
   async flushAll(): Promise<void> {
-    this.flushAllSync()
+    for (const runId of [...this.accumulators.keys()]) await this.flush(runId)
   }
 
   async shutdown(): Promise<void> {
