@@ -46,8 +46,17 @@ function toolCallBy(entries: SessionEntry[], toolCallId: string): ToolCallConten
     const content = message?.content
     if (!Array.isArray(content)) continue
     for (const block of content) {
-      const b = block as ToolCallContent
+      const b = block as ToolCallContent & { id?: string; arguments?: Record<string, unknown> }
+      // Pi CLI uses id/arguments; our enricher contract uses toolCallId/input.
       if (b.type === 'toolCall' && b.toolCallId === toolCallId) return b
+      if (b.type === 'toolCall' && b.id === toolCallId) {
+        return {
+          type: 'toolCall',
+          toolCallId: b.toolCallId ?? b.id ?? toolCallId,
+          toolName: b.toolName ?? '',
+          input: (b.input ?? b.arguments) as Record<string, unknown>
+        }
+      }
     }
   }
   return null

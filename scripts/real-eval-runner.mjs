@@ -3,15 +3,12 @@
  * real-eval-runner.mjs — real-LLM smoke for the harness export pipeline.
  *
  * Runs a real model through the Pi CLI, stores the session under a local
- * ignored dir, then replays the real session messages through the same JSONL
- * export schema + redaction rules used by HarnessEventExporter, and asserts:
- *   - assistant text present on message.completed
+ * ignored dir, then replays the real session messages through the ACTUAL
+ * HarnessEventExporter class (bundled from TS via build-export-bundle.mjs)
+ * with real session entries as the enrichment source, and asserts:
+ *   - assistant text present on message.completed enriched
  *   - tool args matched by toolCallId when a tool was called
  *   - no unredacted secret seed appears in the exported JSONL
- *
- * The TypeScript exporter/enricher real-source behavior is covered by unit
- * tests (harness-event-exporter.test.ts / enricher.test.ts); this script owns
- * the real-model end of the pipeline.
  *
  * Security: never accepts an API key on the command line; reuses existing Pi
  * config/env. Results go under harness-obs-output/real/ and are never
@@ -27,25 +24,8 @@ const ROOT = path.resolve(__dirname, '..')
 const OUT_ROOT = path.join(ROOT, 'harness-obs-output')
 const REAL_DIR = path.join(OUT_ROOT, 'real')
 const SESSION_DIR = path.join(REAL_DIR, 'session')
-const SCHEMA_VERSION = 1
-const MASK = '******'
-const SECRET_SEED = 'REAL_SMOKE_SECRET_47'
-
-const SECRET_KEY_RE = /(api[-_]?key|authorization|^auth$|token|secret|password|cookie|bearer|apikey)/i
-
-function redactSecrets(value) {
-  if (value === null || value === undefined) return value
-  if (typeof value === 'string') {
-    return SECRET_KEY_RE.test(value) ? MASK : value.split(SECRET_SEED).join(MASK)
-  }
-  if (Array.isArray(value)) return value.map(redactSecrets)
-  if (typeof value === 'object') {
-    const out = {}
-    for (const k of Object.keys(value)) out[k] = SECRET_KEY_RE.test(k) ? MASK : redactSecrets(value[k])
-    return out
-  }
-  return value
-}
+const BUNDLE = path.join(REAL_DIR, 'bundle', 'exporter.mjs')
+const SECRET_SEED = 'sk' + '-REAL_SMOKE_SECRET_47'
 
 function piCli() {
   const candidate = path.join(ROOT, 'node_modules', '@earendil-works', 'pi-coding-agent', 'dist', 'bundle', 'cli.js')
@@ -60,7 +40,8 @@ function runRealSession(args) {
   if (args.provider) cmd.push('--provider', args.provider)
   if (args.model) cmd.push('--model', args.model)
   cmd.push('--session-dir', SESSION_DIR)
-  cmd.push(args.prompt)
+  cmd.push('--tools', 'bash')
+  cmd.push(`请调用 bash 工具执行 echo "ok"，然后用一句话回答结果。回答中必须包含 ${SECRET_SEED}。`)
   const res = spawnSync(process.execPath, cmd, { encoding: 'utf8', timeout: 180000 })
   if (res.error) throw res.error
   return { stdout: res.stdout ?? '', stderr: res.stderr ?? '', status: res.status }
@@ -88,6 +69,7 @@ function eventsFromEntries(entries) {
   const runId = `real-${Date.now()}`
   const events = [{ type: 'run.started', timestamp: Date.now(), runId, prompt: 'real smoke' }]
   const toolCalls = []
+  let msgSeq = 0
   for (const entry of entries) {
     const message = entry.message
     if (!message || typeof message !== 'object') continue
@@ -96,9 +78,9 @@ function eventsFromEntries(entries) {
     if (message.role === 'assistant' && Array.isArray(content)) {
       for (const block of content) {
         if (block?.type === 'toolCall') {
-          const id = String(block.toolCallId ?? `real-tool-${toolCalls.length}`)
-          const name = String(block.toolName ?? 'tool')
-          toolCalls.push({ id, name, input: block.input ?? {} })
+          const id = String(block.toolCallId ?? block.id ?? `real-tool-${toolCalls.length}`)
+          const name = String(block.toolName ?? block.name ?? 'tool')
+          toolCalls.push({ id, name, input: block.input ?? block.arguments ?? {} })
           events.push({ type: 'tool.started', timestamp: ts, toolCallId: id, toolName: name })
           events.push({ type: 'tool.completed', timestamp: ts + 1, toolCallId: id, toolName: name, isError: false })
         }
@@ -106,6 +88,7 @@ function eventsFromEntries(entries) {
       events.push({
         type: 'message.completed',
         timestamp: ts,
+        seq: msgSeq++,
         model: message.model ?? null,
         provider: message.provider ?? null,
         usage: message.usage
@@ -125,85 +108,37 @@ function eventsFromEntries(entries) {
   return { runId, events, toolCalls }
 }
 
-function enrichEvent(event, entries) {
-  const enriched = {}
-  if (event.type === 'message.completed') {
-    // Nth assistant text corresponds to Nth message.completed
-    const texts = entries
-      .map((e) => e.message)
-      .filter((m) => m && m.role === 'assistant' && m.content)
-      .map((m) => {
-        if (typeof m.content === 'string') return [m.content]
-        return m.content.filter((b) => b?.type === 'text' && typeof b.text === 'string').map((b) => b.text)
-      })
-      .flat()
-    const idx = event._seq ?? 0
-    if (texts.length > 0) enriched.text = texts[Math.min(idx, texts.length - 1)]
-  } else if (event.type === 'tool.started' || event.type === 'tool.completed') {
-    const call = entries
-      .map((e) => e.message?.content)
-      .flat()
-      .find((b) => b?.type === 'toolCall' && b.toolCallId === event.toolCallId)
-    if (call) enriched.toolArgs = call.input ?? {}
-  }
-  return Object.keys(enriched).length ? enriched : undefined
-}
-
-function renderExport(entries, events, toolCalls, runId) {
-  const lines = []
-  let msgSeq = 0
-  const now = Date.now()
-  for (const ev of events) {
-    const event = { ...ev }
-    if (event.type === 'message.completed') { event._seq = msgSeq++; delete event._seq }
-    const enriched = enrichEvent({ ...event, _seq: msgSeq - 1 }, entries)
-    const line = { schemaVersion: SCHEMA_VERSION, sessionId: 'real-smoke', event, ...(enriched ? { enriched } : {}) }
-    lines.push(JSON.stringify(redactSecrets(line)))
-  }
-  const footer = {
-    schemaVersion: SCHEMA_VERSION,
-    footer: {
-      runId,
-      status: 'success',
-      startedAt: events[0]?.timestamp ?? now,
-      endedAt: now,
-      eventCount: events.length,
-      totalTokens: null,
-      durationMs: null,
-      toolCalls: toolCalls.length,
-      toolFailures: 0
-    }
-  }
-  lines.push(JSON.stringify(redactSecrets(footer)))
-  return lines.join('\n') + '\n'
-}
-
 function assertExport(raw, toolCalls) {
   const failures = []
   if (!raw.includes('message.completed')) failures.push('missing message.completed line')
   if (toolCalls.length > 0 && !raw.includes('tool.started')) failures.push('missing tool.started line')
   if (!raw.includes('enriched')) failures.push('missing enriched fields')
   if (raw.includes(SECRET_SEED)) failures.push('unredacted secret seed found in export')
+  if (toolCalls.length > 0 && !raw.includes('"toolArgs"')) failures.push('missing toolArgs for real tool calls')
   return failures
 }
 
 function parseArgs(argv) {
-  const args = { provider: null, model: null, prompt: '用中文简短回答：2+2 等于几？' }
+  const args = { provider: null, model: null }
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--provider') args.provider = argv[++i]
     else if (argv[i] === '--model') args.model = argv[++i]
-    else if (argv[i] === '--prompt') args.prompt = argv[++i]
     else if (argv[i] === '--help' || argv[i] === '-h') {
-      console.log('Usage: node scripts/real-eval-runner.mjs [--provider zhipu] [--model pattern] [--prompt "..."]')
+      console.log('Usage: node scripts/real-eval-runner.mjs [--provider zhipu] [--model pattern]')
       process.exit(0)
     }
   }
   return args
 }
 
-function main() {
+async function main() {
   const args = parseArgs(process.argv.slice(2))
   try {
+    if (!existsSync(BUNDLE)) {
+      console.error('Exporter bundle missing. Run: node scripts/build-export-bundle.mjs')
+      process.exit(3)
+    }
+    const { HarnessEventExporter } = await import(pathToFileURL(BUNDLE).href)
     const result = runRealSession(args)
     const entries = readSessionEntries()
     if (entries.length === 0) {
@@ -212,10 +147,17 @@ function main() {
       process.exit(3)
     }
     const { runId, events, toolCalls } = eventsFromEntries(entries)
-    mkdirSync(path.join(REAL_DIR, 'exports'), { recursive: true })
-    const raw = renderExport(entries, events, toolCalls, runId)
-    const file = path.join(REAL_DIR, 'exports', `${runId}.jsonl`)
-    writeFileSync(file, raw, 'utf8')
+    const dir = path.join(REAL_DIR, 'exports')
+    mkdirSync(dir, { recursive: true })
+    const exporter = new HarnessEventExporter({
+      dir,
+      registerExitHook: false,
+      source: { readRawEntries: async () => entries }
+    })
+    for (const event of events) exporter.observe(event, 'real-smoke')
+    await exporter.shutdown()
+    const file = path.join(dir, `${runId}.jsonl`)
+    const raw = readFileSync(file, 'utf8')
     const failures = assertExport(raw, toolCalls)
     const report = {
       runId,
@@ -239,4 +181,5 @@ function main() {
   }
 }
 
-main()
+import { pathToFileURL } from 'node:url'
+await main()
