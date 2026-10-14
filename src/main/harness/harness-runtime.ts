@@ -260,11 +260,15 @@ export class HarnessRuntime implements AgentRuntime {
       platform: `${os.platform()}-${os.arch()}`,
       nodeVersion: process.versions.node
     })
+    const sessionSource = options.sessions
+      ? { readRawEntries: (sessionId: string) => options.sessions!.readRawEntries(sessionId) }
+      : undefined
     this.eventExporter =
       options.eventExporter ??
       new HarnessEventExporter({
         dir: options.exportDir ?? path.join(os.homedir(), '.pi-harness', 'harness-exports'),
-        enabled: options.enableEventExport !== false
+        enabled: options.enableEventExport !== false,
+        source: sessionSource
       })
     if (options.eventExporter || options.enableEventExport !== false) {
       this.onEvent((envelope) => this.eventExporter.observe(envelope.event, envelope.sessionId))

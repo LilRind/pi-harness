@@ -55,3 +55,48 @@ describe('HarnessEventExporter', () => {
     }
   })
 })
+
+import type { SessionEntry } from '@shared/types/workspace'
+
+function sessionWithToolAndText(): SessionEntry[] {
+  const ts = (n: number) => `2026-10-15T00:00:0${n}.000Z`
+  return [
+    {
+      id: 'a1', parentId: null, timestamp: ts(1), type: 'message',
+      message: {
+        role: 'assistant',
+        content: [
+          { type: 'toolCall', toolCallId: 'call-9', toolName: 'bash', input: { command: 'ls' } },
+          { type: 'text', text: 'looked it up' }
+        ],
+        model: 'm', provider: 'p'
+      }
+    } as SessionEntry
+  ]
+}
+
+describe('HarnessEventExporter with real session source', () => {
+  it('enriches real export with text and toolArgs via async readRawEntries', async () => {
+    const dir = tempDir()
+    try {
+      const exporter = new HarnessEventExporter({
+        dir,
+        registerExitHook: false,
+        source: { readRawEntries: async () => sessionWithToolAndText() }
+      })
+      exporter.observe({ type: 'run.started', timestamp: 100, runId: 'run-real', prompt: 'p' }, 's9')
+      exporter.observe({ type: 'tool.started', timestamp: 110, toolCallId: 'call-9', toolName: 'bash' }, 's9')
+      exporter.observe({ type: 'message.completed', timestamp: 200, usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, total: 2, cost: 0 }, model: 'm', provider: 'p' }, 's9')
+      exporter.observe({ type: 'run.completed', timestamp: 210, runId: 'run-real', status: 'success' }, 's9')
+      await exporter.shutdown()
+      const raw = readFileSync(path.join(dir, 'run-real.jsonl'), 'utf8')
+      const lines = raw.trim().split('\n').map((l) => JSON.parse(l))
+      const tool = lines.find((l) => l.event?.type === 'tool.started')
+      const msg = lines.find((l) => l.event?.type === 'message.completed')
+      expect(tool?.enriched?.toolArgs).toEqual({ command: 'ls' })
+      expect(msg?.enriched?.text).toBe('looked it up')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
