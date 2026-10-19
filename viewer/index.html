@@ -12,6 +12,7 @@
       h1 { font-size: 14px; margin: 0; font-weight: 600; }
       #drop { flex: 1; border: 1px dashed var(--line); border-radius: 8px; padding: 10px; text-align: center; color: var(--muted); cursor: pointer; }
       #drop.drag { border-color: var(--ok); color: var(--ok); }
+      body.drag-over #drop { border-color: var(--ok); color: var(--ok); background: rgba(63,185,80,.10); }
       main { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 12px; padding: 12px 16px; height: calc(100vh - 60px); }
       section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; overflow: auto; }
       h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 0 0 8px; }
@@ -28,7 +29,7 @@
   <body>
     <header>
       <h1>Harness JSONL Viewer</h1>
-      <div id="drop">拖拽 / 选择 <code>run-*.jsonl</code> 文件（纯本地解析，不上传）</div>
+      <div id="drop">点击选择，或把 <code>.jsonl</code> 文件拖到页面任意位置（纯本地解析，不上传）</div>
     </header>
     <main>
       <section id="tree">
@@ -40,6 +41,7 @@
         <div id="summary"><p class="muted">等待文件…</p></div>
       </section>
     </main>
-    <script type="module" src="./viewer.mjs"></script>
+    <script src="./viewer-core.js" defer></script>
+    <script src="./viewer.mjs" defer></script>
   </body>
 </html>

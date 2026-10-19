@@ -1,7 +1,9 @@
 const drop = document.getElementById('drop')
 const treeBody = document.getElementById('treeBody')
 const summary = document.getElementById('summary')
+const { parseJsonl, buildSpanTree, summarizeEvents } = window.ViewerCore
 
+// 点击选择文件（回退方式）
 drop.addEventListener('click', () => {
   const input = document.createElement('input')
   input.type = 'file'
@@ -9,76 +11,81 @@ drop.addEventListener('click', () => {
   input.onchange = () => input.files?.[0] && load(input.files[0])
   input.click()
 })
-for (const ev of ['dragenter', 'dragover']) drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add('drag') })
-for (const ev of ['dragleave', 'drop']) drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.remove('drag') })
-drop.addEventListener('drop', (e) => { const f = e.dataTransfer?.files?.[0]; if (f) load(f) })
+
+// 全页拖拽：拖到页面任意位置都能加载，并阻止浏览器默认“打开文件”行为
+let dragDepth = 0
+document.addEventListener('dragenter', (event) => {
+  event.preventDefault()
+  dragDepth++
+  document.body.classList.add('drag-over')
+})
+document.addEventListener('dragover', (event) => event.preventDefault())
+document.addEventListener('dragleave', (event) => {
+  event.preventDefault()
+  dragDepth = Math.max(0, dragDepth - 1)
+  if (dragDepth === 0) document.body.classList.remove('drag-over')
+})
+document.addEventListener('drop', (event) => {
+  event.preventDefault()
+  dragDepth = 0
+  document.body.classList.remove('drag-over')
+  const file = event.dataTransfer?.files?.[0]
+  if (file) load(file)
+})
 
 async function load(file) {
-  const text = await file.text()
-  const records = text.split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l) } catch { return null } }).filter(Boolean)
-  const events = records.filter((r) => r.event).map((r) => ({ ...r.event, _enriched: r.enriched }))
-  const footer = records.find((r) => r.footer)?.footer
-  renderTree(events)
-  renderSummary(events, footer)
+  try {
+    const text = await file.text()
+    const parsed = parseJsonl(text)
+    if (parsed.events.length === 0) {
+      treeBody.innerHTML = `<p class="muted">没有找到可识别的事件行。文件共 ${parsed.records.length} 行、${parsed.malformedLines} 行解析失败，需包含带 <code>event</code> 字段的 JSONL 导出。</p>`
+      summary.innerHTML = '<p class="muted">没有可显示的摘要。</p>'
+      return
+    }
+    renderTree(parsed.events)
+    renderSummary(parsed.events, parsed.footer)
+    drop.innerHTML = `已加载 <b>${file.name}</b>（${parsed.events.length} 个事件）— 可继续点击或拖入其他文件`
+  } catch (err) {
+    treeBody.innerHTML = `<p class="err">读取文件失败：${err?.message ?? err}</p>`
+  }
 }
 
 function renderTree(events) {
   treeBody.innerHTML = ''
-  const stack = []
-  const byId = new Map()
-  let seq = 0
-  const nodeFor = (kind, name, t) => {
-    const id = `n${seq++}`
-    const parent = stack.length ? stack[stack.length - 1].id : null
-    const n = { id, kind, name, t, parent, error: false, children: [] }
-    byId.set(id, n)
-    if (parent) byId.get(parent).children.push(n)
-    return n
-  }
-  const roots = []
-  for (const ev of events) {
-    if (ev.type === 'message.started') { const n = nodeFor('model', 'model turn', ev.timestamp); roots.push(n); stack.push(n) }
-    else if (ev.type === 'message.completed') { const n = stack.pop(); if (n) { n.end = ev.timestamp; n.tokens = ev.usage?.total ?? null } }
-    else if (ev.type === 'tool.started') { const n = nodeFor('tool', ev.toolName ?? 'tool', ev.timestamp); roots.push(...(stack.length ? [] : [n])); stack.push(n) }
-    else if (ev.type === 'tool.completed') { const n = stack.pop(); if (n) { n.end = ev.timestamp; if (ev.isError) n.error = true } }
-    else if (ev.type === 'runtime.error') { if (stack.length) stack[stack.length - 1].error = true }
-  }
-  for (const r of roots) treeBody.appendChild(renderNode(r, 0))
+  for (const root of buildSpanTree(events)) treeBody.appendChild(renderNode(root, 0))
 }
 
-function renderNode(n, depth) {
+function renderNode(node, depth) {
   const row = document.createElement('div')
   row.className = 'row' + (depth ? ' indent' : '')
-  const dur = n.t && n.end ? `${n.end - n.t}ms` : '—'
-  const meta = `${n.error ? '<span class="err">error</span>' : ''} ${dur}${n.tokens != null ? ` · ${n.tokens} tokens` : ''}`
-  row.innerHTML = `<div style="padding-left:${depth * 14}px"><span class="${n.error ? 'err' : 'ok'}">●</span> <b>${n.name}</b> <span class="muted">${meta}</span></div>`
+  const duration = node.t && node.end ? `${node.end - node.t}ms` : '—'
+  const meta = `${node.error ? '<span class="err">error</span>' : ''} ${duration}${
+    node.tokens != null ? ` · ${node.tokens} tokens` : ''
+  }`
+  row.innerHTML = `<div style="padding-left:${depth * 14}px"><span class="${
+    node.error ? 'err' : 'ok'
+  }">●</span> <b>${node.name}</b> <span class="muted">${meta}</span></div>`
   const wrap = document.createElement('div')
   wrap.appendChild(row)
-  for (const c of n.children) wrap.appendChild(renderNode(c, depth + 1))
+  for (const child of node.children) wrap.appendChild(renderNode(child, depth + 1))
   return wrap
 }
 
 function renderSummary(events, footer) {
-  const tokens = events.reduce((s, e) => s + (e.usage?.total ?? 0), 0)
-  const tools = events.filter((e) => e.type === 'tool.completed').length
-  const errs = events.filter((e) => e.type === 'tool.completed' && e.isError).length
-  const msgs = events.filter((e) => e.type === 'message.completed').length
-  const maxToken = Math.max(1, ...events.filter((e) => e.usage?.total).map((e) => e.usage.total))
-  const rows = [
-    ['runId', footer?.runId ?? '—'],
-    ['状态', footer?.status ?? '—'],
-    ['事件数', String(footer?.eventCount ?? events.length)],
-    ['明细 token', String(tokens)],
-    ['耗时', footer?.durationMs != null ? `${footer.durationMs}ms` : '—'],
-    ['工具调用 / 失败', `${tools} / ${errs}`],
-    ['assistant 消息', String(msgs)]
-  ]
+  const result = summarizeEvents(events, footer)
   summary.innerHTML =
     '<ul style="list-style:none;margin:0;padding:0">' +
-    rows.map(([k, v]) => `<li class="row"><span class="muted" style="min-width:110px">${k}</span><b>${v}</b></li>`).join('') +
+    result.rows
+      .map(([key, value]) => `<li class="row"><span class="muted" style="min-width:110px">${key}</span><b>${value}</b></li>`)
+      .join('') +
     '</ul>' +
     '<h2>消息 token 趋势（附赠）</h2>' +
     '<div style="display:flex;align-items:flex-end;gap:4px;height:60px">' +
-    events.filter((e) => e.type === 'message.completed' && e.usage?.total).map((e) => `<div class="bar" style="flex:1;height:${Math.max(4, (e.usage.total / maxToken) * 56)}px" title="${e.usage.total} tokens"></div>`).join('') +
+    result.bars
+      .map(
+        (bar) =>
+          `<div class="bar" style="flex:1;height:${Math.max(4, (bar.value / result.maxToken) * 56)}px" title="${bar.title}"></div>`
+      )
+      .join('') +
     '</div>'
 }

@@ -71,3 +71,24 @@ test-results/
 playwright-report/
 blob-report/
 e2e/.auth/
+
+# AOCI agent host integration (machine-bound; do not commit)
+.mcp.json
+.mcp.json.backup.*
+
+# Harness observability outputs (real LLM sessions — never commit)
+harness-obs-output/
+
+# Local agent tooling runtimes (never commit)
+.agents/
+.aoci/
+.codegraph/
+.ua/
+
+# AOCI host index exports (machine-bound cognition layer)
+aoci.txt
+aoci.code.txt
+aoci.meta.txt
+
+# Session backup files
+AGENTS.md.backup.*

@@ -1,5 +1,7 @@
 import { defineConfig } from '@playwright/test'
 
+const chromiumExecutablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH
+
 /**
  * Electron smoke E2E. Requires a prior `pnpm compile` so `out/main/index.js` exists.
  * Launch uses the local electron binary + built main entry.
@@ -13,6 +15,9 @@ export default defineConfig({
   retries: 0,
   reporter: [['list']],
   use: {
-    trace: 'on-first-retry'
+    trace: 'on-first-retry',
+    ...(chromiumExecutablePath
+      ? { launchOptions: { executablePath: chromiumExecutablePath } }
+      : {})
   }
 })
